@@ -50,14 +50,14 @@ EPISODIC_NODE_RETURN = """
 def get_entity_node_save_query(provider: GraphProvider, labels: str) -> str:
     if provider == GraphProvider.FALKORDB:
         return f"""
-            MERGE (n:Entity {{uuid: $entity_data.uuid}})
+            MERGE (n {{uuid: $entity_data.uuid}})
             SET n:{labels}
             SET n = $entity_data
             RETURN n.uuid AS uuid
         """
 
     return f"""
-        MERGE (n:Entity {{uuid: $entity_data.uuid}})
+        MERGE (n {{uuid: $entity_data.uuid}})
         SET n:{labels}
         SET n = $entity_data
         WITH n CALL db.create.setNodeVectorProperty(n, "name_embedding", $entity_data.name_embedding)
@@ -74,7 +74,7 @@ def get_entity_node_save_bulk_query(provider: GraphProvider, nodes: list[dict]) 
                     (
                         f"""
                         UNWIND $nodes AS node
-                        MERGE (n:Entity {{uuid: node.uuid}})
+                        MERGE (n {{uuid: node.uuid}})
                         SET n:{label}
                         SET n = node
                         WITH n, node
@@ -88,7 +88,7 @@ def get_entity_node_save_bulk_query(provider: GraphProvider, nodes: list[dict]) 
 
     return """
         UNWIND $nodes AS node
-        MERGE (n:Entity {uuid: node.uuid})
+        MERGE (n {uuid: node.uuid})
         SET n:$(node.labels)
         SET n = node
         WITH n, node CALL db.create.setNodeVectorProperty(n, "name_embedding", node.name_embedding)

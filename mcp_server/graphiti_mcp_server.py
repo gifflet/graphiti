@@ -34,6 +34,14 @@ from graphiti_core.search.search_config_recipes import (
 )
 from graphiti_core.search.search_filters import SearchFilters
 from graphiti_core.utils.maintenance.graph_data_operations import clear_data
+from graphiti_core.utils.ontology_utils.entity_types_utils import validate_entity_types
+from custom_types_utils import (
+    parse_json_to_entity_types,
+    parse_json_to_edge_types,
+    parse_json_to_edge_mappings,
+    create_entity_types_from_dict,
+    convert_edge_mappings,
+)
 
 load_dotenv()
 
@@ -696,6 +704,9 @@ async def add_memory(
     source: str = 'text',
     source_description: str = '',
     uuid: str | None = None,
+    custom_entity_types: dict[str, dict[str, Any]] | None = Field(None, description='JSON defining custom entity types with fields and optional docstrings'),
+    custom_edge_types: dict[str, dict[str, Any]] | None = Field(None, description='JSON defining custom edge types with fields and optional docstrings'), 
+    custom_edge_mappings: dict[str, list[str]] | None = Field(None, description='JSON defining mappings between entity type pairs and allowed edge types'),
 ) -> SuccessResponse | ErrorResponse:
     """Add an episode to memory. This is the primary way to add information to the graph.
 
@@ -703,18 +714,30 @@ async def add_memory(
     Episodes for the same group_id are processed sequentially to avoid race conditions.
 
     Args:
-        name (str): Name of the episode
-        episode_body (str): The content of the episode to persist to memory. When source='json', this must be a
+        name: Name of the episode
+        episode_body: The content of the episode to persist to memory. When source='json', this must be a
                            properly escaped JSON string, not a raw Python dictionary. The JSON data will be
                            automatically processed to extract entities and relationships.
-        group_id (str, optional): A unique ID for this graph. If not provided, uses the default group_id from CLI
+        group_id: A unique ID for this graph. If not provided, uses the default group_id from CLI
                                  or a generated one.
-        source (str, optional): Source type, must be one of:
+        source: Source type, must be one of:
                                - 'text': For plain text content (default)
                                - 'json': For structured data
                                - 'message': For conversation-style content
-        source_description (str, optional): Description of the source
-        uuid (str, optional): Optional UUID for the episode
+        source_description: Description of the source
+        uuid: Optional UUID for the episode
+        custom_entity_types: Dict defining custom entity types with their fields and optional
+                            docstrings. Format: {"EntityName": {"fields": {"field1": "str", "field2": "int"},
+                            "docstring": "Optional description"}}. Supported field types: str, int, float,
+                            bool, list, dict, List[str], Dict[str, Any]. Custom entities are additive to
+                            the default entity types (Requirement, Preference, Procedure).
+        custom_edge_types: Dict defining custom edge types with their fields and optional
+                            docstrings. Uses the same format as custom_entity_types. These define the
+                            structure of relationship attributes between entities.
+        custom_edge_mappings: Dict defining which edge types are allowed between specific entity
+                            type pairs. Format: {"('SourceEntity', 'TargetEntity')": ["EDGE_TYPE1",
+                            "EDGE_TYPE2"]}. This controls which relationships can exist between different
+                            entity types in the knowledge graph.
 
     Examples:
         # Adding plain text content
@@ -744,6 +767,47 @@ async def add_memory(
             group_id="some_arbitrary_string"
         )
 
+        # Adding content with custom entity types
+        add_memory(
+            name="Employee Information",
+            episode_body="John Smith is a programmer. He works for TechCorp in the engineering team. Alex Johnson is his manager.",
+            source="text",
+            custom_entity_types={
+                "Person": {
+                    "fields": {"name": "str", "role": "str"},
+                    "docstring": "Information about a person"
+                },
+                "Company": {
+                    "fields": {"name": "str"},
+                    "docstring": "Information about a company"
+                },
+                "Team": {
+                    "fields": {"name": "str"},
+                    "docstring": "Information about a team within a company"
+                }
+            },
+            custom_edge_types={
+                "WORKS_FOR": {
+                    "fields": {},
+                    "docstring": "Employment relationship between a person and a company"
+                },
+                "BELONGS_TO_TEAM": {
+                    "fields": {},
+                    "docstring": "Person belongs to a specific team"
+                },
+                "MANAGES": {
+                    "fields": {},
+                    "docstring": "Management relationship between people"
+                }
+            },
+            custom_edge_mappings={
+                "('Person', 'Company')": ["WORKS_FOR"],
+                "('Person', 'Team')": ["BELONGS_TO_TEAM"],
+                "('Person', 'Person')": ["MANAGES"]
+            },
+            group_id="workplace_data"
+        )
+
     Notes:
         When using source='json':
         - The JSON must be a properly escaped string, not a raw Python dictionary
@@ -751,6 +815,15 @@ async def add_memory(
         - Complex nested structures are supported (arrays, nested objects, mixed data types), but keep nesting to a minimum
         - Entities will be created from appropriate JSON properties
         - Relationships between entities will be established based on the JSON structure
+
+        Custom Entity Types:
+        - Custom entity types are additive - they complement, not replace, default entity types
+        - Parameters are now dict objects, no JSON string escaping needed
+        - Field types must be from the supported list: str, int, float, bool, list, dict, List[str], Dict[str, Any]
+        - Docstrings in custom entities provide guidance to the LLM during entity extraction
+        - Custom entities are validated against existing EntityNode fields to prevent conflicts
+        - Edge mappings use string keys with format: "('SourceEntity', 'TargetEntity')"
+        - Always include the 'source' parameter to specify content type (text, json, message)
     """
     global graphiti_client, episode_queues, queue_workers
 
@@ -783,8 +856,50 @@ async def add_memory(
         async def process_episode():
             try:
                 logger.info(f"Processing queued episode '{name}' for group_id: {group_id_str}")
-                # Use all entity types if use_custom_entities is enabled, otherwise use empty dict
-                entity_types = ENTITY_TYPES if config.use_custom_entities else {}
+                
+                # Process custom types if provided
+                custom_entities = {}
+                custom_edges = None
+                custom_mappings = None
+
+                try:
+                    # Process custom entity types (already dict format)
+                    if custom_entity_types:
+                        custom_entities = create_entity_types_from_dict(custom_entity_types)
+                        logger.info(f"Created {len(custom_entities)} custom entity types")
+                    
+                    # Process custom edge types (already dict format)
+                    if custom_edge_types:
+                        custom_edges = create_entity_types_from_dict(custom_edge_types)
+                        logger.info(f"Created {len(custom_edges)} custom edge types")
+                    
+                    # Process custom edge mappings (already dict format)
+                    if custom_edge_mappings:
+                        custom_mappings = convert_edge_mappings(custom_edge_mappings)
+                        logger.info(f"Processed {len(custom_mappings)} custom edge mappings")
+                    
+                    # Validate custom entity types
+                    if custom_entities:
+                        validate_entity_types(custom_entities)
+                        logger.info("Custom entity types validation passed")
+                    
+                    # Validate custom edge types
+                    if custom_edges:
+                        validate_entity_types(custom_edges)  
+                        logger.info("Custom edge types validation passed")
+                    
+                    # Combine default and custom entity types (additive approach)
+                    if config.use_custom_entities:
+                        # final_entity_types = ENTITY_TYPES.copy()  # Start with defaults
+                        final_entity_types = {}
+                        final_entity_types.update(custom_entities)  # Add custom types
+                        logger.info(f"Using {len(final_entity_types)} total entity types ({len(ENTITY_TYPES)} default + {len(custom_entities)} custom)")
+                    else:
+                        final_entity_types = None
+
+                except Exception as e:
+                    logger.error(f"Error processing custom types: {e}")
+                    return ErrorResponse(error=f"Failed to process custom types: {str(e)}")
 
                 await client.add_episode(
                     name=name,
@@ -794,7 +909,9 @@ async def add_memory(
                     group_id=group_id_str,  # Using the string version of group_id
                     uuid=uuid,
                     reference_time=datetime.now(timezone.utc),
-                    entity_types=entity_types,
+                    entity_types=final_entity_types,
+                    edge_types=custom_edges,
+                    edge_type_map=custom_mappings,
                 )
                 logger.info(f"Episode '{name}' added successfully")
 

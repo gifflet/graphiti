@@ -309,7 +309,7 @@ class EntityNode(Node):
         }
         entity_data.update(self.attributes or {})
 
-        labels = ':'.join(self.labels + ['Entity'])
+        labels = ':'.join(self.labels) if self.labels else 'Entity'
 
         result = await driver.execute_query(
             get_entity_node_save_query(driver.provider, labels),

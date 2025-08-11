@@ -130,7 +130,7 @@ async def add_nodes_and_edges_bulk_tx(
         }
 
         entity_data.update(node.attributes or {})
-        entity_data['labels'] = list(set(node.labels + ['Entity']))
+        entity_data['labels'] = node.labels if node.labels else ['Entity']
         nodes.append(entity_data)
 
     edges: list[dict[str, Any]] = []
